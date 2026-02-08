@@ -1,0 +1,26 @@
+{
+  "name": "youtube-downloader-mcp",
+  "version": "0.2.0",
+  "description": "YouTube video/subtitle downloader with MCP server interface and Electron desktop UI, powered by yt-dlp",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "youtube-downloader-mcp": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "electron:dev": "cd electron-app && npm run dev:electron",
+    "electron:build": "cd electron-app && npm run build",
+    "electron:install": "cd electron-app && npm install"
+  },
+  "keywords": [
+    "youtube",
+    "downloader",
+    "mcp",
+    "yt-dlp",
+    "subtitle",
+    "transcript",
+    "electron"
+  ],
+  "license": "MIT"
+}
