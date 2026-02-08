@@ -32,10 +32,16 @@ function createMainApplicationWindow() {
   const viteDevUrl = process.env.VITE_DEV_SERVER_URL;
   if (viteDevUrl) {
     mainApplicationWindow.loadURL(viteDevUrl);
+    // Why: only open DevTools in dev mode, never in production
     mainApplicationWindow.webContents.openDevTools();
   } else {
     mainApplicationWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  // Why: intercept new-window requests (e.g. target="_blank") to open in default browser
+  mainApplicationWindow.webContents.setWindowOpenHandler(() => {
+    return { action: 'deny' };
+  });
 
   mainApplicationWindow.on('closed', () => {
     mainApplicationWindow = null;
@@ -46,9 +52,23 @@ function createMainApplicationWindow() {
  * Why: lib/core/ modules are ES modules (root package.json "type": "module"),
  * but Electron main is compiled to CJS. We use a CJS bridge file that calls
  * native import() with properly encoded file:// URLs (handles ! in paths).
+ *
+ * In dev mode: lib/core/ is at ../../lib/core/ relative to dist-electron/
+ * In packaged app: extraResources puts it at process.resourcesPath/lib/core/
  */
+function resolveCoreDirectory(): string {
+  const devCorePath = path.resolve(__dirname, '..', '..', 'lib', 'core', 'bridge.cjs');
+  try {
+    require.resolve(devCorePath);
+    return devCorePath;
+  } catch {
+    // Why: in packaged app, extraResources places lib/ under Resources/
+    return path.join(process.resourcesPath, 'lib', 'core', 'bridge.cjs');
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { loadCoreModule } = require(path.resolve(__dirname, '..', '..', 'lib', 'core', 'bridge.cjs'));
+const { loadCoreModule } = require(resolveCoreDirectory());
 
 async function importCoreModule(moduleName: string) {
   return await loadCoreModule(moduleName);
