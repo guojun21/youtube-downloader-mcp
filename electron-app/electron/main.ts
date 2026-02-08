@@ -44,16 +44,14 @@ function createMainApplicationWindow() {
 
 /**
  * Why: lib/core/ modules are ES modules (root package.json "type": "module"),
- * but Electron main is compiled to CJS. TypeScript transforms import() into require(),
- * which can't load ES modules. We use Function constructor to preserve native import().
+ * but Electron main is compiled to CJS. We use a CJS bridge file that calls
+ * native import() with properly encoded file:// URLs (handles ! in paths).
  */
-// eslint-disable-next-line @typescript-eslint/no-implied-eval
-const dynamicImportEsModule = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { loadCoreModule } = require(path.resolve(__dirname, '..', '..', 'lib', 'core', 'bridge.cjs'));
 
 async function importCoreModule(moduleName: string) {
-  const corePath = path.resolve(__dirname, '..', '..', 'lib', 'core', moduleName);
-  const fileUrl = `file://${corePath}`;
-  return await dynamicImportEsModule(fileUrl);
+  return await loadCoreModule(moduleName);
 }
 
 /**
@@ -64,14 +62,15 @@ async function searchYoutubeVideosWithYtDlp(query: string) {
   // Why: ensure yt-dlp is available before attempting search
   const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
   ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
+  const ytDlpBin = ytDlpBuilder.getYtDlpBinaryPath();
 
   const searchArgs = [
-    '-m', 'yt_dlp', '--no-color', '--dump-json',
+    '--no-color', '--dump-json',
     '--flat-playlist', '--no-download',
     `ytsearch10:${query}`
   ];
 
-  const result = spawnSync('python3', searchArgs, {
+  const result = spawnSync(ytDlpBin, searchArgs, {
     encoding: 'utf8',
     timeout: 30000,
   });
@@ -112,13 +111,14 @@ async function searchYoutubeVideosWithYtDlp(query: string) {
 async function getVideoFormatOptionsWithYtDlp(videoId: string) {
   const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
   ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
+  const ytDlpBin = ytDlpBuilder.getYtDlpBinaryPath();
 
   const infoArgs = [
-    '-m', 'yt_dlp', '--no-color', '--dump-json',
+    '--no-color', '--dump-json',
     '--no-download', `https://www.youtube.com/watch?v=${videoId}`
   ];
 
-  const result = spawnSync('python3', infoArgs, {
+  const result = spawnSync(ytDlpBin, infoArgs, {
     encoding: 'utf8',
     timeout: 60000,
   });
