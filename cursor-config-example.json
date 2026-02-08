@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "youtube-downloader": {
+      "command": "node",
+      "args": [
+        "/Users/ruicheng.gu/Library/Mobile Documents/com~apple~CloudDocs/Documents/!002Projects/!mcps/youtube-downloader-mcp/index.js"
+      ],
+      "env": {
+        "YTDL_USE_COOKIES": "true",
+        "YTDL_BROWSER": "chrome",
+        "YTDL_PLAYER_CLIENT": "android"
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 55vh;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.icon {
+  margin-bottom: 20px;
+  opacity: 0.3;
+}
+
+.title {
+  font-size: 22px;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.message {
+  font-size: 13px;
+}

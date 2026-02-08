@@ -1,0 +1,42 @@
+/* Why: height 38px matches macOS traffic-light vertical center (hiddenInset) */
+.titlebar {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  /* Why: 80px left padding leaves room for macOS traffic-light buttons */
+  padding: 0 16px 0 80px;
+  background: var(--bg-secondary);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+
+.tabNav {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.tabBtn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tabBtn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.active {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+}

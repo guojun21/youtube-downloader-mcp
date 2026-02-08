@@ -32,8 +32,6 @@ function createMainApplicationWindow() {
   const viteDevUrl = process.env.VITE_DEV_SERVER_URL;
   if (viteDevUrl) {
     mainApplicationWindow.loadURL(viteDevUrl);
-    // Why: only open DevTools in dev mode, never in production
-    mainApplicationWindow.webContents.openDevTools();
   } else {
     mainApplicationWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
@@ -188,13 +186,24 @@ function registerIpcHandlersForYoutubeOperations() {
       const idExtractor = await importCoreModule('youtube_video_id_extractor_utility.js');
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
+      // Why: YouTube serves video+audio as separate DASH streams; we must request
+      // bestvideo+bestaudio and let yt-dlp/ffmpeg merge them. Falling back to 'best'
+      // handles the rare case where only pre-muxed formats exist.
+      let downloadFormat: string;
+      if (container === 'mp3') {
+        downloadFormat = 'bestaudio/best';
+      } else if (container === 'mp4') {
+        downloadFormat = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best';
+      } else {
+        downloadFormat = `bestvideo+bestaudio/best`;
+      }
+
+      // Why: pass null so the service creates a timestamped subfolder automatically
       const result = downloaderService.startBackgroundVideoDownloadTask({
         videoId,
         sourceUrl: videoUrl,
-        outputDirectoryPath: idExtractor.getDefaultVideoOutputDirectoryPath(),
-        downloadFormat: container === 'mp3'
-          ? 'bestaudio/best'
-          : `best[ext=${container}]/best[ext=mp4]/best`,
+        outputDirectoryPath: null,
+        downloadFormat,
       });
 
       return result.taskId;
@@ -218,6 +227,68 @@ function registerIpcHandlersForYoutubeOperations() {
       error: task.error || null,
     };
   });
+
+  ipcMain.handle('youtube:getTaskHistory', async (_event, typeFilter?: string) => {
+    const taskStore = await importCoreModule('download_task_persistent_json_store.js');
+    let tasks = taskStore.retrieveAllTaskRecords();
+    if (typeFilter) {
+      tasks = tasks.filter((t: any) => t.type === typeFilter);
+    }
+    // Why: sort descending so newest tasks appear first
+    tasks.sort((a: any, b: any) => {
+      const ta = a.created_at ? Date.parse(a.created_at) : 0;
+      const tb = b.created_at ? Date.parse(b.created_at) : 0;
+      return tb - ta;
+    });
+    return tasks.slice(0, 100);
+  });
+
+  ipcMain.handle('youtube:downloadSubtitle', async (_event, videoId: string, language: string) => {
+    const subtitleService = await importCoreModule('youtube_subtitle_downloader_service.js');
+    const idExtractor = await importCoreModule('youtube_video_id_extractor_utility.js');
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    // Why: put subtitles in the existing video subfolder, or create a new timestamped one
+    const outputDir = idExtractor.findExistingVideoSubdirectoryByVideoId(videoId)
+      || idExtractor.createTimestampedVideoSubdirectory(videoId);
+    const result = subtitleService.downloadSubtitlesAndGenerateTranscript({
+      videoId,
+      sourceUrl: videoUrl,
+      outputDirectoryPath: outputDir,
+      requestedLanguage: language || 'en-orig,en',
+    });
+    return result;
+  });
+
+  ipcMain.handle(
+    'youtube:transcribe',
+    async (_event, videoId: string, language: string, model?: string) => {
+      const transcriptionService = await importCoreModule('video_transcription_service.js');
+      const idExtractor = await importCoreModule('youtube_video_id_extractor_utility.js');
+
+      // Why: search recursively under youtubevideos/ (handles both flat and subfolder layouts)
+      const videoFilePath = idExtractor.findDownloadedVideoFileRecursively(videoId);
+
+      if (!videoFilePath) {
+        return {
+          success: false,
+          error: `No downloaded video found for ${videoId} under youtubevideos/. Download it first.`,
+        };
+      }
+
+      const pathMod = require('path');
+      try {
+        const result = transcriptionService.startBackgroundTranscriptionTask({
+          videoFilePath,
+          outputDirectoryPath: pathMod.dirname(videoFilePath),
+          language: language || 'auto',
+          model: model || 'mlx-community/whisper-large-v3-turbo',
+        });
+        return { success: true, ...result };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
 }
 
 app.whenReady().then(() => {

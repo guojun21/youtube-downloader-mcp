@@ -1,307 +1,170 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Search, Download, Settings, X, Check, Loader2, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
 import { youtubeDownloaderApiClient } from './api/youtube';
+import { useDownloadPoller } from './hooks/use_download_poller';
+import { useHistoryLoader } from './hooks/use_history_loader';
+import { TitleBar } from './components/title_bar/TitleBar';
+import { SearchBox } from './components/toolbar/SearchBox';
+import { HistoryFilters } from './components/toolbar/HistoryFilters';
+import { NotificationBanner } from './components/notification_banner/NotificationBanner';
+import { SearchTab } from './components/search_tab/SearchTab';
+import { HistoryTab } from './components/history_tab/HistoryTab';
+import { DownloadModal } from './components/download_modal/DownloadModal';
 import type {
   YoutubeVideoSearchResultInfo,
   VideoDownloadFormatOption,
   ActiveVideoDownloadItem,
 } from './types';
-import './App.css';
+import styles from './App.module.css';
+
+type TabId = 'search' | 'history';
 
 function App() {
-  const [searchResultVideos, setSearchResultVideos] = useState<
-    YoutubeVideoSearchResultInfo[]
-  >([]);
-  const [isSearchInProgress, setIsSearchInProgress] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [activeDownloads, setActiveDownloads] = useState<
-    ActiveVideoDownloadItem[]
-  >([]);
-  const [selectedVideoForDownload, setSelectedVideoForDownload] =
-    useState<YoutubeVideoSearchResultInfo | null>(null);
-  const [availableDownloadOptions, setAvailableDownloadOptions] = useState<
-    VideoDownloadFormatOption[]
-  >([]);
-  const [isLoadingDownloadOptions, setIsLoadingDownloadOptions] =
-    useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [activeTab, setActiveTab] = useState<TabId>('search');
+  const [searchResults, setSearchResults] = useState<YoutubeVideoSearchResultInfo[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [notification, setNotification] = useState<string | null>(null);
+  const [activeDownloads, setActiveDownloads] = useState<ActiveVideoDownloadItem[]>([]);
+  const [selectedVideo, setSelectedVideo] = useState<YoutubeVideoSearchResultInfo | null>(null);
+  const [downloadOptions, setDownloadOptions] = useState<VideoDownloadFormatOption[]>([]);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const [isDownloadingSubtitle, setIsDownloadingSubtitle] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState('all');
 
-  const handleSearchSubmission = async () => {
-    const searchQuery = searchInputRef.current?.value || '';
-    if (!searchQuery.trim()) return;
+  useDownloadPoller(activeDownloads, setActiveDownloads);
+  const { historyRecords, isLoading: isLoadingHistory, refreshHistory } =
+    useHistoryLoader(activeTab === 'history', historyFilter);
 
-    setIsSearchInProgress(true);
-    setErrorMessage(null);
-
+  const handleSearch = async (query: string) => {
+    setIsSearching(true);
+    setNotification(null);
     try {
-      const searchResponse =
-        await youtubeDownloaderApiClient.searchVideosByQuery(searchQuery);
-      setSearchResultVideos(searchResponse.videos);
-    } catch (error: unknown) {
-      const displayError =
-        error instanceof Error ? error.message : 'Search failed';
-      setErrorMessage(displayError);
+      const res = await youtubeDownloaderApiClient.searchVideosByQuery(query);
+      setSearchResults(res.videos);
+    } catch (e: unknown) {
+      setNotification(e instanceof Error ? e.message : 'Search failed');
     } finally {
-      setIsSearchInProgress(false);
+      setIsSearching(false);
     }
   };
 
-  const handleVideoSelectionForDownload = async (
-    video: YoutubeVideoSearchResultInfo
-  ) => {
-    setSelectedVideoForDownload(video);
-    setIsLoadingDownloadOptions(true);
-
+  const handleVideoClick = async (video: YoutubeVideoSearchResultInfo) => {
+    setSelectedVideo(video);
+    setIsLoadingOptions(true);
     try {
-      const downloadOptions =
-        await youtubeDownloaderApiClient.getAvailableDownloadOptionsForVideo(
-          video.id
-        );
-      setAvailableDownloadOptions(downloadOptions);
-    } catch (error: unknown) {
-      const displayError =
-        error instanceof Error ? error.message : 'Failed to get options';
-      setErrorMessage(displayError);
+      const opts = await youtubeDownloaderApiClient.getAvailableDownloadOptionsForVideo(video.id);
+      setDownloadOptions(opts);
+    } catch (e: unknown) {
+      setNotification(e instanceof Error ? e.message : 'Failed to get options');
     } finally {
-      setIsLoadingDownloadOptions(false);
+      setIsLoadingOptions(false);
     }
   };
 
-  const handleDownloadStart = async (
-    selectedOption: VideoDownloadFormatOption
-  ) => {
-    if (!selectedVideoForDownload) return;
-
+  const handleDownload = async (option: VideoDownloadFormatOption) => {
+    if (!selectedVideo) return;
     try {
-      const downloadTrackingId =
-        await youtubeDownloaderApiClient.startVideoDownloadTask(
-          selectedVideoForDownload.id,
-          selectedOption.container,
-          selectedOption.quality
-        );
-
-      const newActiveDownload: ActiveVideoDownloadItem = {
-        id: `${selectedVideoForDownload.id}-${Date.now()}`,
-        downloadId: downloadTrackingId,
-        video: selectedVideoForDownload,
-        option: selectedOption,
+      const trackingId = await youtubeDownloaderApiClient.startVideoDownloadTask(
+        selectedVideo.id, option.container, option.quality,
+      );
+      setActiveDownloads((prev) => [{
+        id: `${selectedVideo.id}-${Date.now()}`,
+        downloadId: trackingId,
+        video: selectedVideo,
+        option,
         progress: { status: 'Starting', percentage: 0 },
-      };
-
-      setActiveDownloads((previousDownloads) => [
-        newActiveDownload,
-        ...previousDownloads,
-      ]);
-      setSelectedVideoForDownload(null);
-      setAvailableDownloadOptions([]);
-    } catch (error: unknown) {
-      const displayError =
-        error instanceof Error ? error.message : 'Download failed';
-      setErrorMessage(displayError);
+      }, ...prev]);
+      setSelectedVideo(null);
+      setDownloadOptions([]);
+    } catch (e: unknown) {
+      setNotification(e instanceof Error ? e.message : 'Download failed');
     }
   };
 
-  const pollAndUpdateActiveDownloadProgress = useCallback(async () => {
-    const downloadsStillInProgress = activeDownloads.filter(
-      (download) =>
-        download.progress.status !== 'Completed' &&
-        download.progress.status !== 'Failed'
-    );
-
-    for (const activeDownload of downloadsStillInProgress) {
-      try {
-        const latestProgress =
-          await youtubeDownloaderApiClient.getDownloadProgressByTrackingId(
-            activeDownload.downloadId
-          );
-        setActiveDownloads((previousDownloads) =>
-          previousDownloads.map((download) =>
-            download.id === activeDownload.id
-              ? { ...download, progress: latestProgress }
-              : download
-          )
-        );
-      } catch {
-        // Why: transient polling errors should not disrupt the UI
+  const handleSubtitleDownload = async (language: string) => {
+    if (!selectedVideo) return;
+    setIsDownloadingSubtitle(true);
+    try {
+      const result = await youtubeDownloaderApiClient.downloadSubtitle(selectedVideo.id, language);
+      if (result.success) {
+        setSelectedVideo(null);
+        setNotification(`Subtitle saved: ${result.subtitlePath}`);
+      } else {
+        setNotification(result.message || result.error || 'Subtitle download failed');
       }
+    } catch (e: unknown) {
+      setNotification(e instanceof Error ? e.message : 'Subtitle download failed');
+    } finally {
+      setIsDownloadingSubtitle(false);
     }
-  }, [activeDownloads]);
+  };
 
-  useEffect(() => {
-    const pollingInterval = setInterval(
-      pollAndUpdateActiveDownloadProgress,
-      1000
-    );
-    return () => clearInterval(pollingInterval);
-  }, [pollAndUpdateActiveDownloadProgress]);
+  const handleTranscribe = async (language: string) => {
+    if (!selectedVideo) return;
+    setIsTranscribing(true);
+    try {
+      const result = await youtubeDownloaderApiClient.startTranscription(selectedVideo.id, language);
+      if (result.success) {
+        setSelectedVideo(null);
+        setNotification(`Transcription started (task: ${result.taskId}). Check History tab for progress.`);
+      } else {
+        setNotification(result.error || 'Transcription failed to start');
+      }
+    } catch (e: unknown) {
+      setNotification(e instanceof Error ? e.message : 'Transcription failed');
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
 
   return (
-    <div className="app">
-      {/* Header */}
-      <header className="header">
-        <div className="search-box">
-          <Search className="search-icon" size={20} />
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder="Paste YouTube URL or search..."
-            onKeyDown={(e) => e.key === 'Enter' && handleSearchSubmission()}
-          />
-          <button onClick={handleSearchSubmission} disabled={isSearchInProgress}>
-            {isSearchInProgress ? (
-              <Loader2 className="spin" size={20} />
-            ) : (
-              'Search'
-            )}
-          </button>
-        </div>
-        <button className="settings-btn">
-          <Settings size={20} />
-        </button>
-      </header>
+    <div className={styles.app}>
+      <TitleBar activeTab={activeTab} onTabChange={setActiveTab} />
 
-      {/* Error message */}
-      {errorMessage && (
-        <div className="error-banner">
-          <AlertCircle size={16} />
-          <span>{errorMessage}</span>
-          <button onClick={() => setErrorMessage(null)}>
-            <X size={16} />
-          </button>
-        </div>
+      <div className={styles.toolbar}>
+        {activeTab === 'search' && (
+          <SearchBox isSearching={isSearching} onSearch={handleSearch} />
+        )}
+        {activeTab === 'history' && (
+          <HistoryFilters
+            activeFilter={historyFilter}
+            isLoading={isLoadingHistory}
+            onFilterChange={setHistoryFilter}
+            onRefresh={refreshHistory}
+          />
+        )}
+      </div>
+
+      {notification && (
+        <NotificationBanner message={notification} onDismiss={() => setNotification(null)} />
       )}
 
-      {/* Main content */}
-      <main className="main">
-        {/* Downloads section */}
-        {activeDownloads.length > 0 && (
-          <section className="downloads-section">
-            <h2>
-              <Download size={18} /> Downloads
-            </h2>
-            <div className="downloads-list">
-              {activeDownloads.map((download) => (
-                <div key={download.id} className="download-item">
-                  <img src={download.video.thumbnailUrl} alt="" />
-                  <div className="download-info">
-                    <h4>{download.video.title}</h4>
-                    <p>
-                      {download.option.quality} • {download.option.container}
-                    </p>
-                    <div className="progress-bar">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${download.progress.percentage}%` }}
-                      />
-                    </div>
-                    <span className="progress-text">
-                      {download.progress.status === 'Completed' ? (
-                        <>
-                          <Check size={14} /> Completed
-                        </>
-                      ) : download.progress.status === 'Failed' ? (
-                        <>
-                          <AlertCircle size={14} /> {download.progress.error}
-                        </>
-                      ) : (
-                        <>
-                          <Loader2 className="spin" size={14} />{' '}
-                          {download.progress.percentage}%
-                        </>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+      <main className={styles.main}>
+        {activeTab === 'search' && (
+          <SearchTab
+            videos={searchResults}
+            activeDownloads={activeDownloads}
+            isSearching={isSearching}
+            onVideoClick={handleVideoClick}
+          />
         )}
-
-        {/* Search results */}
-        {searchResultVideos.length > 0 && (
-          <section className="videos-section">
-            <h2>Search Results</h2>
-            <div className="videos-grid">
-              {searchResultVideos.map((video) => (
-                <div
-                  key={video.id}
-                  className="video-card"
-                  onClick={() => handleVideoSelectionForDownload(video)}
-                >
-                  <div className="thumbnail">
-                    <img src={video.thumbnailUrl} alt="" />
-                    <span className="duration">{video.duration}</span>
-                  </div>
-                  <div className="video-info">
-                    <h3>{video.title}</h3>
-                    <p>{video.author}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+        {activeTab === 'history' && (
+          <HistoryTab records={historyRecords} isLoading={isLoadingHistory} />
         )}
-
-        {/* Empty state */}
-        {searchResultVideos.length === 0 &&
-          activeDownloads.length === 0 &&
-          !isSearchInProgress && (
-            <div className="empty-state">
-              <Download size={64} strokeWidth={1} />
-              <h2>YouTube Downloader</h2>
-              <p>Paste a YouTube URL or search for videos to get started</p>
-            </div>
-          )}
       </main>
 
-      {/* Download options modal */}
-      {selectedVideoForDownload && (
-        <div
-          className="modal-overlay"
-          onClick={() => setSelectedVideoForDownload(null)}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <button
-              className="modal-close"
-              onClick={() => setSelectedVideoForDownload(null)}
-            >
-              <X size={20} />
-            </button>
-            <div className="modal-header">
-              <img src={selectedVideoForDownload.thumbnailUrl} alt="" />
-              <div>
-                <h3>{selectedVideoForDownload.title}</h3>
-                <p>{selectedVideoForDownload.author}</p>
-              </div>
-            </div>
-            <div className="modal-body">
-              <h4>Select format</h4>
-              {isLoadingDownloadOptions ? (
-                <div className="loading-options">
-                  <Loader2 className="spin" size={24} />
-                  <span>Loading options...</span>
-                </div>
-              ) : (
-                <div className="options-list">
-                  {availableDownloadOptions.map((option, index) => (
-                    <button
-                      key={index}
-                      className="option-btn"
-                      onClick={() => handleDownloadStart(option)}
-                    >
-                      <span className="option-quality">{option.quality}</span>
-                      <span className="option-container">
-                        {option.container}
-                      </span>
-                      <span className="option-size">{option.size}</span>
-                      <Download size={16} />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+      {selectedVideo && (
+        <DownloadModal
+          video={selectedVideo}
+          downloadOptions={downloadOptions}
+          isLoadingOptions={isLoadingOptions}
+          isDownloadingSubtitle={isDownloadingSubtitle}
+          isTranscribing={isTranscribing}
+          onClose={() => setSelectedVideo(null)}
+          onDownload={handleDownload}
+          onSubtitleDownload={handleSubtitleDownload}
+          onTranscribe={handleTranscribe}
+        />
       )}
     </div>
   );
