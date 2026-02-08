@@ -3,13 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "description": "YouTube Downloader - Electron + React",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "tsc -b && vite build && npm run build:electron",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:electron": "tsc -p tsconfig.electron.json && mv dist-electron/main.js dist-electron/main.cjs && mv dist-electron/preload.js dist-electron/preload.cjs",
     "preview": "vite preview",
     "electron": "electron .",
     "pack": "electron-builder --dir",
@@ -40,7 +40,7 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*.cjs"
     ],
     "mac": {
       "target": "dmg",

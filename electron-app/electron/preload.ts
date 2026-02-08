@@ -3,7 +3,7 @@
  * replacing the old HTTP-based API client with direct IPC calls.
  */
 
-import { contextBridge, ipcRenderer } from 'electron';
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   searchVideos: (query: string) => ipcRenderer.invoke('youtube:search', query),

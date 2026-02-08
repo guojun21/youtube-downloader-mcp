@@ -2,14 +2,14 @@
  * Electron main process.
  * Why: replaces the .NET backend entirely — imports yt-dlp core modules directly
  * and exposes them to the renderer via IPC handlers.
+ *
+ * Compiled to CommonJS by tsconfig.electron.json, so we use require() for
+ * static Node.js modules and dynamic import() for the ES module core layer.
  */
 
 import { app, BrowserWindow, ipcMain } from 'electron';
-import path from 'path';
-import { createRequire } from 'module';
-
-// Why: Electron's main process uses CommonJS; we use createRequire to import ES modules
-const require = createRequire(import.meta.url);
+import * as path from 'path';
+import { spawnSync } from 'child_process';
 
 let mainApplicationWindow: BrowserWindow | null = null;
 
@@ -22,14 +22,16 @@ function createMainApplicationWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
     },
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#1a1a2e',
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainApplicationWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  // Why: in dev mode, load from Vite dev server for HMR; in prod, load the built HTML
+  const viteDevUrl = process.env.VITE_DEV_SERVER_URL;
+  if (viteDevUrl) {
+    mainApplicationWindow.loadURL(viteDevUrl);
     mainApplicationWindow.webContents.openDevTools();
   } else {
     mainApplicationWindow.loadFile(path.join(__dirname, '../dist/index.html'));
@@ -40,123 +42,136 @@ function createMainApplicationWindow() {
   });
 }
 
-// Why: dynamic import() works for ES modules from CJS/Electron main process
+/**
+ * Why: lib/core/ modules are ES modules (root package.json "type": "module"),
+ * but Electron main is compiled to CJS. TypeScript transforms import() into require(),
+ * which can't load ES modules. We use Function constructor to preserve native import().
+ */
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const dynamicImportEsModule = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
+
 async function importCoreModule(moduleName: string) {
-  const corePath = path.resolve(__dirname, '../../lib/core', moduleName);
-  return await import(corePath);
+  const corePath = path.resolve(__dirname, '..', '..', 'lib', 'core', moduleName);
+  const fileUrl = `file://${corePath}`;
+  return await dynamicImportEsModule(fileUrl);
+}
+
+/**
+ * Why: yt-dlp search is not in the core services because MCP doesn't need a search tool;
+ * only the Electron UI needs interactive search, so we inline it here.
+ */
+async function searchYoutubeVideosWithYtDlp(query: string) {
+  // Why: ensure yt-dlp is available before attempting search
+  const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
+  ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
+
+  const searchArgs = [
+    '-m', 'yt_dlp', '--no-color', '--dump-json',
+    '--flat-playlist', '--no-download',
+    `ytsearch10:${query}`
+  ];
+
+  const result = spawnSync('python3', searchArgs, {
+    encoding: 'utf8',
+    timeout: 30000,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'Search failed');
+  }
+
+  const videos = result.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line: string) => {
+      try {
+        const data = JSON.parse(line);
+        return {
+          id: data.id || '',
+          title: data.title || 'Unknown',
+          author: data.uploader || data.channel || 'Unknown',
+          duration: data.duration
+            ? new Date(data.duration * 1000).toISOString().slice(11, 19)
+            : 'N/A',
+          thumbnailUrl: data.thumbnails?.[0]?.url || '',
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  return {
+    kind: 'Search',
+    title: `Search: ${query}`,
+    videos,
+  };
+}
+
+async function getVideoFormatOptionsWithYtDlp(videoId: string) {
+  const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
+  ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
+
+  const infoArgs = [
+    '-m', 'yt_dlp', '--no-color', '--dump-json',
+    '--no-download', `https://www.youtube.com/watch?v=${videoId}`
+  ];
+
+  const result = spawnSync('python3', infoArgs, {
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'Failed to get video info');
+  }
+
+  const videoInfo = JSON.parse(result.stdout);
+  const formats = (videoInfo.formats || [])
+    .filter((f: any) => f.vcodec !== 'none' || f.acodec !== 'none')
+    .map((f: any) => ({
+      container: f.ext || 'mp4',
+      quality: f.format_note || f.resolution || 'unknown',
+      size: f.filesize
+        ? `${(f.filesize / 1024 / 1024).toFixed(1)} MB`
+        : f.filesize_approx
+          ? `~${(f.filesize_approx / 1024 / 1024).toFixed(1)} MB`
+          : 'N/A',
+    }));
+
+  // Why: if yt-dlp returned real formats, use them; otherwise provide common defaults
+  const FALLBACK_FORMAT_OPTIONS = [
+    { container: 'mp4', quality: '1080p', size: '' },
+    { container: 'mp4', quality: '720p', size: '' },
+    { container: 'mp4', quality: '480p', size: '' },
+    { container: 'mp4', quality: '360p', size: '' },
+    { container: 'mp3', quality: 'Audio only', size: '' },
+  ];
+
+  return formats.length > 0 ? formats.slice(0, 15) : FALLBACK_FORMAT_OPTIONS;
 }
 
 function registerIpcHandlersForYoutubeOperations() {
   ipcMain.handle('youtube:search', async (_event, query: string) => {
-    // Why: yt-dlp doesn't have a search API like YoutubeExplode did;
-    // we use yt-dlp's search functionality instead
-    const { spawnSync } = await import('child_process');
-    const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
-    ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
-
-    const searchArgs = [
-      '-m', 'yt_dlp', '--no-color', '--dump-json',
-      '--flat-playlist', '--no-download',
-      `ytsearch10:${query}`
-    ];
-
-    const result = spawnSync('python3', searchArgs, {
-      encoding: 'utf8',
-      timeout: 30000,
-    });
-
-    if (result.status !== 0) {
-      throw new Error(result.stderr || 'Search failed');
-    }
-
-    const videos = result.stdout
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line: string) => {
-        try {
-          const data = JSON.parse(line);
-          return {
-            id: data.id || '',
-            title: data.title || 'Unknown',
-            author: data.uploader || data.channel || 'Unknown',
-            duration: data.duration
-              ? new Date(data.duration * 1000).toISOString().slice(11, 19)
-              : 'N/A',
-            thumbnailUrl: data.thumbnails?.[0]?.url || '',
-          };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-
-    return {
-      kind: 'Search',
-      title: `Search: ${query}`,
-      videos,
-    };
+    return await searchYoutubeVideosWithYtDlp(query);
   });
 
   ipcMain.handle('youtube:getOptions', async (_event, videoId: string) => {
-    // Why: yt-dlp can list available formats with --dump-json
-    const { spawnSync } = await import('child_process');
-    const ytDlpBuilder = await importCoreModule('yt_dlp_command_argument_builder.js');
-    ytDlpBuilder.ensureYtDlpIsInstalledOrAutoInstall();
-
-    const infoArgs = [
-      '-m', 'yt_dlp', '--no-color', '--dump-json',
-      '--no-download', `https://www.youtube.com/watch?v=${videoId}`
-    ];
-
-    const result = spawnSync('python3', infoArgs, {
-      encoding: 'utf8',
-      timeout: 30000,
-    });
-
-    if (result.status !== 0) {
-      throw new Error(result.stderr || 'Failed to get video info');
-    }
-
-    const videoInfo = JSON.parse(result.stdout);
-    const formats = (videoInfo.formats || [])
-      .filter((f: any) => f.vcodec !== 'none' || f.acodec !== 'none')
-      .map((f: any) => ({
-        container: f.ext || 'mp4',
-        quality: f.format_note || f.resolution || 'unknown',
-        size: f.filesize
-          ? `${(f.filesize / 1024 / 1024).toFixed(1)} MB`
-          : f.filesize_approx
-            ? `~${(f.filesize_approx / 1024 / 1024).toFixed(1)} MB`
-            : 'N/A',
-      }));
-
-    // Why: deduplicate and return a manageable list of common format options
-    const PREFERRED_FORMAT_OPTIONS = [
-      { container: 'mp4', quality: '1080p', size: '' },
-      { container: 'mp4', quality: '720p', size: '' },
-      { container: 'mp4', quality: '480p', size: '' },
-      { container: 'mp4', quality: '360p', size: '' },
-      { container: 'mp3', quality: 'Audio only', size: '' },
-    ];
-
-    return formats.length > 0 ? formats.slice(0, 15) : PREFERRED_FORMAT_OPTIONS;
+    return await getVideoFormatOptionsWithYtDlp(videoId);
   });
 
   ipcMain.handle(
     'youtube:startDownload',
-    async (_event, videoId: string, container: string, quality: string) => {
+    async (_event, videoId: string, container: string, _quality: string) => {
       const downloaderService = await importCoreModule('youtube_video_downloader_service.js');
+      const idExtractor = await importCoreModule('youtube_video_id_extractor_utility.js');
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-      const { getDefaultVideoOutputDirectoryPath } = await importCoreModule(
-        'youtube_video_id_extractor_utility.js'
-      );
 
       const result = downloaderService.startBackgroundVideoDownloadTask({
         videoId,
         sourceUrl: videoUrl,
-        outputDirectoryPath: getDefaultVideoOutputDirectoryPath(),
+        outputDirectoryPath: idExtractor.getDefaultVideoOutputDirectoryPath(),
         downloadFormat: container === 'mp3'
           ? 'bestaudio/best'
           : `best[ext=${container}]/best[ext=mp4]/best`,
