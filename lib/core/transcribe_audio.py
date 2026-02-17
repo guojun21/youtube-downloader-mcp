@@ -10,7 +10,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
 import time
 
 
@@ -19,6 +21,18 @@ def emit_progress(status, progress=0.0, **extra):
     msg = {"status": status, "progress": round(progress, 3), **extra}
     sys.stderr.write(json.dumps(msg) + "\n")
     sys.stderr.flush()
+
+
+def get_audio_duration(filepath):
+    """Use ffprobe to get audio/video duration in seconds. Returns 0 on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries",
+             "format=duration", "-of", "csv=p=0", filepath],
+            capture_output=True, text=True, timeout=15)
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
 
 
 def detect_language_from_title(title):
@@ -56,11 +70,16 @@ def main():
         title = os.path.splitext(os.path.basename(args.input))[0]
         language = detect_language_from_title(title)
 
-    emit_progress("loading_model", 0.0, model=args.model, language=language or "auto-detect")
+    # Why: get audio duration upfront so we can estimate transcription progress
+    audio_duration = get_audio_duration(args.input)
+
+    emit_progress("loading_model", 0.0, model=args.model,
+                  language=language or "auto-detect",
+                  audio_duration=round(audio_duration, 1))
 
     import mlx_whisper
 
-    emit_progress("transcribing", 0.05)
+    emit_progress("transcribing", 0.05, audio_duration=round(audio_duration, 1))
     start_time = time.time()
 
     # Why: mlx_whisper.transcribe() runs the full pipeline — audio decode,
@@ -72,8 +91,41 @@ def main():
     if language:
         transcribe_kwargs["language"] = language
 
-    result = mlx_whisper.transcribe(args.input, **transcribe_kwargs)
+    # Why: run transcription in a thread so the main thread can emit progress
+    # estimates every 2 seconds instead of blocking silently for minutes.
+    result_holder = [None]
+    error_holder = [None]
 
+    def run_transcribe():
+        try:
+            result_holder[0] = mlx_whisper.transcribe(args.input, **transcribe_kwargs)
+        except Exception as e:
+            error_holder[0] = e
+
+    transcribe_thread = threading.Thread(target=run_transcribe, daemon=True)
+    transcribe_thread.start()
+
+    # Why: conservative speed factor — whisper-large-v3-turbo on Apple Silicon
+    # typically runs at 0.3x-0.7x of audio duration. Using 0.7 to avoid the
+    # progress bar reaching 95% too early.
+    speed_factor = 0.7
+    estimated_total = audio_duration * speed_factor if audio_duration > 0 else 120.0
+
+    while transcribe_thread.is_alive():
+        transcribe_thread.join(timeout=2.0)
+        if transcribe_thread.is_alive():
+            elapsed = time.time() - start_time
+            raw_progress = min(elapsed / estimated_total, 0.95) if estimated_total > 0 else 0.5
+            mapped = 0.05 + raw_progress * 0.90  # map to 5%-95%
+            emit_progress("transcribing", mapped,
+                          elapsed_seconds=round(elapsed, 1),
+                          estimated_total=round(estimated_total, 1),
+                          audio_duration=round(audio_duration, 1))
+
+    if error_holder[0] is not None:
+        raise error_holder[0]
+
+    result = result_holder[0]
     elapsed = time.time() - start_time
     emit_progress("transcribing", 0.95, elapsed_seconds=round(elapsed, 1))
 
